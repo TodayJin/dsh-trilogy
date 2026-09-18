@@ -99,7 +99,7 @@ function fakeLlm(payload) {
 }
 
 /**
- * A fake agent rooted at `cwd`, recording every steer.
+ * A fake agent rooted at `cwd`, recording every steer and every queued send.
  *
  * The session models the two surface facts this plugin depends on: the live node
  * list with `eventAt`, and an `append` that applies the same append/replace
@@ -110,6 +110,7 @@ function fakeLlm(payload) {
  */
 function fakeAgent(cwd) {
 	const steered = [];
+	const sent = [];
 	const log = new Map();
 	const nodes = [];
 	let replaced = 0;
@@ -133,7 +134,13 @@ function fakeAgent(cwd) {
 			return event;
 		},
 	};
-	return { session, steer: (message) => steered.push(message), steered };
+	return {
+		session,
+		steer: (message) => steered.push(message),
+		steered,
+		send: (message, target, wakeup) => sent.push({ message, target, wakeup }),
+		sent,
+	};
 }
 
 /** The live surface nodes a fake session carries under one source form. */
@@ -345,6 +352,9 @@ await check("memory_read returns the file that was written", async () => {
 
 /* --- 3. the end-of-turn nudge ------------------------------------- */
 
+/** The owed reminder inside one pre-step decision, if any. */
+const nudgeOf = (decision) => decision.messages.find((message) => message.source?.form === "trilogy-nudge");
+
 const runTurn = async (target, { work, record }) => {
 	handlers.get("session/event")(target.session, { type: "turn/start" });
 	if (work) handlers.get("tools/result")({ agent: target });
@@ -352,14 +362,26 @@ const runTurn = async (target, { work, record }) => {
 		await checkpoint.execute({ sessions: [{ done: "recorded during the turn" }] }, { agent: target });
 	}
 	await handlers.get("agent/turn-stopping")({ agent: target });
-	return target.steered;
+	// The reminder is owed, never sent: it must arrive with the NEXT step's messages.
+	return { decision: await preStep(handlers, target) };
 };
 
-await check("a working turn that recorded nothing is nudged once", async () => {
+await check("a working turn that recorded nothing is nudged at the next step, not in a turn of its own", async () => {
 	const target = fakeAgent(projectRoot);
-	const steered = await runTurn(target, { work: true, record: false });
-	assert.equal(steered.length, 1, "expected exactly one steer");
-	const payload = JSON.stringify(steered[0]);
+	const { decision } = await runTurn(target, { work: true, record: false });
+	assert.equal(
+		target.steered.length,
+		0,
+		"a nudge must not steer the finished turn into another step: the model's reply would become a turn's last message",
+	);
+	assert.equal(
+		target.sent.length,
+		0,
+		"a nudge must not be parked in the inbox either: the driver drains it into a turn of its own",
+	);
+	const reminder = nudgeOf(decision);
+	assert.ok(reminder !== undefined, "the reminder must ride along with the next step");
+	const payload = JSON.stringify(reminder);
 	assert.ok(payload.includes("memory_checkpoint"), "nudge must name the tool");
 	assert.ok(payload.includes("未来的会话会不会浪费时间"), "nudge must carry the admission test");
 });
@@ -367,20 +389,20 @@ await check("a working turn that recorded nothing is nudged once", async () => {
 await check("cooldown suppresses a second nudge in the same session", async () => {
 	const target = fakeAgent(projectRoot);
 	await runTurn(target, { work: true, record: false });
-	await runTurn(target, { work: true, record: false });
-	assert.equal(target.steered.length, 1, "cooldown did not suppress the second nudge");
+	const second = await runTurn(target, { work: true, record: false });
+	assert.equal(nudgeOf(second.decision), undefined, "cooldown did not suppress the second nudge");
 });
 
 await check("a turn that recorded something is not nudged", async () => {
 	const target = fakeAgent(projectRoot);
-	const steered = await runTurn(target, { work: true, record: true });
-	assert.equal(steered.length, 0, "a recording turn should not be nudged");
+	const { decision } = await runTurn(target, { work: true, record: true });
+	assert.equal(nudgeOf(decision), undefined, "a recording turn should not be nudged");
 });
 
 await check("a turn that did no work is not nudged", async () => {
 	const target = fakeAgent(projectRoot);
-	const steered = await runTurn(target, { work: false, record: false });
-	assert.equal(steered.length, 0, "an idle turn should not be nudged");
+	const { decision } = await runTurn(target, { work: false, record: false });
+	assert.equal(nudgeOf(decision), undefined, "an idle turn should not be nudged");
 });
 
 /* --- 4. Settings UI API -------------------------------------------- */
@@ -917,15 +939,13 @@ await check("recording resets the nudge budget", async () => {
 		c.handlers.get("tools/result")({ agent: subject });
 		if (record) await c.tools.get("memory_checkpoint").execute({ sessions: [{ done: "x" }] }, { agent: subject });
 		await c.handlers.get("agent/turn-stopping")({ agent: subject });
+		return nudgeOf(await preStep(c.handlers, subject));
 	};
 
-	await turn(false);
-	assert.equal(subject.steered.length, 1, "the first working turn should be nudged");
-	await turn(false);
-	assert.equal(subject.steered.length, 1, "the budget is 1, so the second must be silent");
+	assert.ok((await turn(false)) !== undefined, "the first working turn should be nudged");
+	assert.ok((await turn(false)) === undefined, "the budget is 1, so the second must be silent");
 	await turn(true);
-	await turn(false);
-	assert.equal(subject.steered.length, 2, "recording must give the budget back");
+	assert.ok((await turn(false)) !== undefined, "recording must give the budget back");
 });
 
 await check("an over-budget injection says what it left out", async () => {
