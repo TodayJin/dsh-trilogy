@@ -626,6 +626,32 @@ await check("clearing is not permanent: the next session scaffolds empty files a
 	);
 });
 
+await check("POST /forget drops the panel entry and leaves every file on disk", async () => {
+	// The registry is an index, not storage: forgetting has to be undone by simply
+	// opening a session in that workspace again, which only works if the files survive.
+	// A 已清除 row is therefore the only thing this may remove.
+	const root = mkdtempSync(join(tmpdir(), "pm-forget-"));
+	mkdirSync(join(root, "memory"), { recursive: true });
+	writeFileSync(join(root, "memory", "PROJECT.md"), "# PROJECT\n\n## 这是什么\n\n还在。\n");
+	await preStep(web.handlers, fakeAgent(root));
+	const listed = await callRoute("/trilogy/workspaces");
+	assert.ok(wsOf(listed.body, root) !== undefined, "the workspace must be registered before forgetting it");
+
+	const { status, body } = await callRoute("/trilogy/forget", { method: "POST", body: { root } });
+	assert.equal(status, 200, JSON.stringify(body));
+	assert.equal(body.forgotten, root);
+
+	const after = await callRoute("/trilogy/workspaces");
+	assert.equal(wsOf(after.body, root), undefined, "the row must be gone from the panel list");
+	assert.ok(existsSync(join(root, "memory", "PROJECT.md")), "forgetting must not touch the disk");
+	assert.ok(read(join(root, "memory", "PROJECT.md")).includes("还在"), "the file must survive intact");
+
+	const again = await callRoute("/trilogy/forget", { method: "POST", body: { root } });
+	assert.equal(again.status, 404, "forgetting a workspace the index no longer lists must say so");
+	const empty = await callRoute("/trilogy/forget", { method: "POST", body: {} });
+	assert.equal(empty.status, 400, "a missing root must be rejected");
+});
+
 await check("POST /clear rejects a workspace that was never recorded", async () => {
 	const { status, body } = await callRoute("/trilogy/clear", { method: "POST", body: { root: "D:/definitely-not-registered" } });
 	assert.equal(status, 400);

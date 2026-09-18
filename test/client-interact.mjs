@@ -189,7 +189,7 @@ const WORKSPACE = (root) => ({ root, memoryDir: join(root, "memory"), firstSeen:
 
 function makeHost() {
 	const state = {
-		workspaces: [WORKSPACE(ALPHA), WORKSPACE(BETA)],
+		workspaces: [WORKSPACE(ALPHA), WORKSPACE(BETA), { ...WORKSPACE("D:\\\\work\\\\stale-cleared"), exists: false }],
 		files: {
 			[ALPHA]: {
 				"PROJECT.md": file("PROJECT.md", "# PROJECT\n\n## State\n\nliving\n"),
@@ -314,6 +314,13 @@ function mutate(state, method, path, queryRoot) {
 	// A GET carries the workspace in the query; a POST carries it in the body.
 	const root = typeof payload.root === "string" && payload.root.length > 0 ? payload.root : queryRoot;
 
+	if (method === "POST" && path === "/trilogy/forget") {
+		// Mirrors the host: only the index entry goes, and forgetting twice is refused.
+		const row = state.workspaces.find((w) => w.root === root);
+		if (row === undefined) return reply(404, { error: "注册表里没有这个工作区：" + root });
+		state.workspaces = state.workspaces.filter((w) => w.root !== root);
+		return reply(200, { forgotten: root });
+	}
 	if (method === "POST" && path === "/trilogy/boot") {
 		const boot = state.boot[root];
 		if (boot === undefined) return reply(400, { error: "未记录的工作区：" + root });
@@ -914,6 +921,32 @@ await check("a synced workspace shows a plain chip with how long ago", async () 
 	assert.ok(text.includes("已同步"), `unexpected chip text: ${text}`);
 	assert.ok(text.includes("1 分钟前"), `the chip did not say how long ago: ${text}`);
 	assert.equal(tree.type, "span", "a synced chip must not be a button");
+});
+
+await check("a cleared workspace can be forgotten, and only its row leaves", async () => {
+	// The index keeps a workspace whose files were deleted, so its row reads 已清除 and
+	// stays forever. Forgetting is the way out — and it must be only that: no other row
+	// may offer it, and the list must survive.
+	const h = harness();
+	let { tree } = await h.paint(h.settings, {});
+	// Match the control itself, not the row: a row is a button too, and its text contains
+	// every child's — including this one.
+	const findForget = (node) => findAll(node, (el) => el.type === "button" && String(el.props?.className ?? "").includes("dsh-pm-btn-mini"));
+	const buttons = findForget(tree);
+	assert.equal(buttons.length, 1, `only a cleared workspace may offer 忘记, saw ${buttons.length}`);
+
+	await click(buttons[0]);
+	tree = await h.settle(h.settings, {});
+	const posted = lastCall(h.host, "POST", "/trilogy/forget");
+	assert.ok(posted !== undefined, "clicking 忘记 sent no forget request");
+	assert.equal(posted.body.root, "D:\\\\work\\\\stale-cleared", `the wrong workspace was forgotten: ${JSON.stringify(posted.body)}`);
+	// The status line names the workspace it just forgot, so read the rows: asserting on
+	// the whole tree would find that echo and never pass.
+	const rows = findAll(tree, (el) => el.type === "button" && String(el.props?.className ?? "") === "dsh-pm-item");
+	assert.ok(!rows.some((row) => textOf(row).includes("stale-cleared")), "the forgotten row must leave the list");
+	assert.ok(rows.some((row) => textOf(row).includes("alpha")), "an untouched row must stay");
+	assert.ok(rows.some((row) => textOf(row).includes("beta")), "an untouched row must stay");
+	assert.equal(findForget(tree).length, 0, "with nothing cleared left, the button must go too");
 });
 
 await check("a workspace with no memory offers to create it and does so on click", async () => {
