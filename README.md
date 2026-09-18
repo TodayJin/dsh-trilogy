@@ -86,8 +86,10 @@ dsh plugin --profile web remove dsh-trilogy
    填完就不再提；
 3. 之后每个会话开始 → 三个文件自动注入上下文（内容没变则不重复注入，**KV cache 友好**；
    内容变了**不重发整块**，只在末尾追加一行「记忆已更新，需要时用 `memory_read`」——
-   改写历史中段会让 prompt cache 从那里到结尾全部失效，实测贵 93 倍）；
-4. 会话干了实事却没记录 → 插件**先欠着**，这条提醒会在**你的下一条消息那一步**随它一起出现，由**主模型**自己判断该不该记。它**不会**在当前回合末尾多逼出一条回复、也**不会自己开一个回合**（那会把「记下了」变成一回合的输出，真正的回答被折叠到中间）。
+   改写历史中段会让 prompt cache 从那里到结尾全部失效，实测贵 93 倍）。
+   注入块开头永远带一行账目：**注入了什么、没注入什么、三个文件实际多大** —— 成熟工作区会先撞到天花板，账目不能等到丢东西才出现；
+4. **一个工作区像一个抽屉，里面往往塞着好几件事** —— 所以日志条目可以带一个**区域**标签（`memory_checkpoint` 的 `area`），注入的名额就按区域分：**每个区域保底 1 条**（聊什么都能看到一点），其余按**最近活跃度**加权（`Σ 0.5^(条目年龄/14天)`，「最近干得多」的多拿），但**单个区域不超过公平份额的 2 倍**（热门区域不能把别的挤没）。区域是**粗粒度闭集**：最多 4 个，第 5 个和留空的一起归入 `通用` —— 宁可粗，不要碎；
+5. 会话干了实事却没记录 → 插件**先欠着**，这条提醒会在**你的下一条消息那一步**随它一起出现，由**主模型**自己判断该不该记。它**不会**在当前回合末尾多逼出一条回复、也**不会自己开一个回合**（那会把「记下了」变成一回合的输出，真正的回答被折叠到中间）。
 
 ### 初次填充（bootstrap）
 
@@ -159,7 +161,7 @@ scaffold 出空模板后，只要 `PROJECT.md` 还是空的，就注入一条 bo
 
 | 工具 | 作用 |
 |---|---|
-| `memory_checkpoint` | 按路由表分类写入。参数：`sessions[]` / `decisions[]` / `project[]` / `notes` |
+| `memory_checkpoint` | 按路由表分类写入。参数：`sessions[]`（每条可带 `area` 区域标签，见上）/ `decisions[]` / `project[]` / `notes` |
 | `memory_read` | 按需读取某个记忆文件（三个文件默认已自动加载；也含 `SESSIONS-archive.md`） |
 | `memory_search` | 零依赖 BM25 检索，连归档一起搜 —— 注入预算之外的内容也找得回来 |
 
@@ -198,7 +200,7 @@ scaffold 出空模板后，只要 `PROJECT.md` 还是空的，就注入一条 bo
 | `bootstrapWhenEmpty` | `true` | `PROJECT.md` 还空着时，注入"去调研并填上"的指令 |
 | `sessionsMaxEntries` | `200` | SESSIONS.md 超过这个条数才把最旧的搬到归档（阈值定得高，避免过早压缩） |
 | `projectRootStrategy` | `"workspace"` | `workspace` = 工作区即项目；`marker` = 向上找 `.git` |
-| `injectBudgetBytes` | `64000` | 注入总字节预算。**是「停止降级的天花板」，不是配额** —— 装得下就立刻返回。实际注入量 = `PROJECT.md` 全文 + `DECISIONS.md` 全文 + 最近 `sessionEntriesInjected` 条日志；**`SESSIONS.md` 全文永远不注入**，所以想让更多日志进上下文要调的是 `sessionEntriesInjected` |
+| `injectBudgetBytes` | `160000` | 注入总字节预算。**是「停止降级的天花板」，不是配额** —— 装得下就立刻返回。**实际生效值还会按路由窗口封顶**：`min(配置值, 窗口 × 16%)`，所以小窗口的模型不会被塞一个吃掉它上下文的块（128K 窗口 → 约 20 KB）。实际注入量 = `PROJECT.md` 全文 + `DECISIONS.md` 全文 + 最近 `sessionEntriesInjected` 条日志；**`SESSIONS.md` 全文永远不注入** |
 | `sessionEntriesInjected` | `15` | 注入最近几条 SESSIONS 条目 —— **这个键才决定有多少日志进上下文**（`SESSIONS.md` 全文永远不注入）。15 条约占 45 KB ≈ 11k token |
 | `nudgeOnTurnEnd` | `true` | 收尾智能判断兜底 |
 | `nudgeCooldownMs` | `600000` | 兜底提醒冷却（10 分钟） |
@@ -226,7 +228,7 @@ scaffold 出空模板后，只要 `PROJECT.md` 还是空的，就注入一条 bo
 ## 开发与测试
 
 ```sh
-node test/smoke.mjs            # 67 项，宿主半边
+node test/smoke.mjs            # 71 项，宿主半边
 node test/client-render.mjs    # 9 项，浏览器半边：每个组件都真的渲染一次，并检查注入的样式表
 node test/client-interact.mjs  # 28 项，浏览器半边：点击 → 请求 → 状态 → 重渲染
 ```

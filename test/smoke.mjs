@@ -405,6 +405,125 @@ await check("a turn that did no work is not nudged", async () => {
 	assert.equal(nudgeOf(decision), undefined, "an idle turn should not be nudged");
 });
 
+/* --- 3b. areas, attention and what may not be cut ---------------- */
+
+/** One hand-written log entry, so a test controls the heading's date and area. */
+const logEntry = (date, area, marker) => `## ${date}${area === null ? "" : ` · ${area}`}\n\n完成：${marker}`;
+
+const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+
+/** A workspace whose SESSIONS.md carries exactly these entries, newest first. */
+const workspaceWithEntries = (entries) => {
+	const root = mkdtempSync(join(tmpdir(), "pm-areas-"));
+	mkdirSync(join(root, "memory"), { recursive: true });
+	writeFileSync(join(root, "memory", "PROJECT.md"), "# PROJECT\n\n> 契约。\n\n## 这是什么\n\n一句话。\n", "utf8");
+	writeFileSync(join(root, "memory", "SESSIONS.md"), `# SESSIONS\n\n> 最新在最上。\n\n${entries.join("\n\n")}\n`, "utf8");
+	writeFileSync(join(root, "memory", "DECISIONS.md"), "# DECISIONS\n\n> 最新在最上。\n", "utf8");
+	return root;
+};
+
+/** The log section of an injected block, or "" when the log was left out. */
+const injectedLog = (text) => {
+	const match = /--- SESSIONS\.md（最近几条）---\n([\s\S]*?)(?:\n\n--- |\n\n--- 未注入|$)/.exec(text);
+	return match === null ? "" : match[1];
+};
+
+/** How many entries of one area reached the block, counted by their markers. */
+const countMarkers = (text, area) => (text.match(new RegExp(`完成：${area}-`, "g")) ?? []).length;
+
+/** The heading a marker's entry carries in the written log. */
+const headingOf = (root, marker) => {
+	const lines = readFileSync(join(root, "memory", "SESSIONS.md"), "utf8").split("\n");
+	const at = lines.findIndex((line) => line.startsWith(`完成：${marker}`));
+	for (let index = at; index >= 0; index -= 1) if (lines[index].startsWith("## ")) return lines[index];
+	return "";
+};
+
+await check("the log spreads across its areas instead of handing every slot to the busiest", async () => {
+	// Twenty entries in one area, three in two others. Recency alone spends every slot on
+	// the busy area, and a session about either quiet one then sees nothing at all.
+	const hot = Array.from({ length: 20 }, (_, i) => logEntry(daysAgo(0), "热", `热-${i}`));
+	const warm = [logEntry(daysAgo(30), "温", "温-0"), logEntry(daysAgo(31), "温", "温-1")];
+	const cold = [logEntry(daysAgo(60), "冷", "冷-0")];
+	const root = workspaceWithEntries([...hot, ...warm, ...cold]);
+	const c = fakeContext();
+	apply(c.ctx, { sessionEntriesInjected: 15 });
+	await preStep(c.handlers, fakeAgent(root));
+	const reader = fakeAgent(root);
+	const pass = await preStep(c.handlers, reader);
+	const log = injectedLog(publishedBlock(reader, pass).content[0].text);
+	assert.ok(countMarkers(log, "冷") >= 1, "a quiet area must not be invisible");
+	assert.ok(countMarkers(log, "温") >= 1, "a quiet area must not be invisible");
+	const hotCount = countMarkers(log, "热");
+	assert.ok(hotCount >= 1, "the busy area must still be represented");
+	assert.ok(hotCount <= 10, `one area must not take more than twice an even share, got ${hotCount}`);
+});
+
+await check("past four areas a new name folds into the catch-all, and so does a missing one", async () => {
+	const full = workspaceWithEntries([
+		logEntry(daysAgo(0), "甲", "甲-0"),
+		logEntry(daysAgo(1), "乙", "乙-0"),
+		logEntry(daysAgo(2), "丙", "丙-0"),
+		logEntry(daysAgo(3), "丁", "丁-0"),
+	]);
+	const left = fakeContext();
+	apply(left.ctx, {});
+	await preStep(left.handlers, fakeAgent(full));
+	await left.tools.get("memory_checkpoint").execute({ sessions: [{ done: "第五个区域", area: "戊" }] }, { agent: fakeAgent(full) });
+	assert.ok(!headingOf(full, "第五个区域").includes("戊"), `a fifth area must fold into the catch-all, got: ${headingOf(full, "第五个区域")}`);
+	await left.tools.get("memory_checkpoint").execute({ sessions: [{ done: "没有区域" }] }, { agent: fakeAgent(full) });
+	assert.ok(!headingOf(full, "没有区域").includes("·"), "an entry with no area must carry no tag");
+	// The cap must not fire early: with room left, a genuinely new area is still written.
+	const room = workspaceWithEntries([
+		logEntry(daysAgo(0), "甲", "甲-0"),
+		logEntry(daysAgo(1), "乙", "乙-0"),
+		logEntry(daysAgo(2), "丙", "丙-0"),
+	]);
+	const spare = fakeContext();
+	apply(spare.ctx, {});
+	await preStep(spare.handlers, fakeAgent(room));
+	await spare.tools.get("memory_checkpoint").execute({ sessions: [{ done: "第四个区域", area: "丁" }] }, { agent: fakeAgent(room) });
+	assert.ok(headingOf(room, "第四个区域").includes("· 丁"), `the fourth area must be kept, got: ${headingOf(room, "第四个区域")}`);
+});
+
+await check("the injected head names the areas the log carries", async () => {
+	const root = workspaceWithEntries([logEntry(daysAgo(0), "网络", "网络-0"), logEntry(daysAgo(1), "插件", "插件-0")]);
+	const c = fakeContext();
+	apply(c.ctx, {});
+	await preStep(c.handlers, fakeAgent(root));
+	const reader = fakeAgent(root);
+	const pass = await preStep(c.handlers, reader);
+	const text = publishedBlock(reader, pass).content[0].text;
+	assert.ok(text.includes("区域："), "the head must map the areas");
+	assert.ok(text.includes("网络(1)"), `the map must count areas, got: ${text.slice(0, 240)}`);
+	assert.ok(text.includes("插件(1)"), "every area belongs on the map");
+});
+
+await check("one oversized PROJECT.md section cannot eat the whole share", async () => {
+	// PROJECT.md's own contract is one screen. Left alone it grows to tens of screens
+	// (58 KB in one real workspace), and then it is the whole block. Each section is
+	// capped on its own so the damage stays local and is stated out loud.
+	const huge = "填充".repeat(20000);
+	const root = mkdtempSync(join(tmpdir(), "pm-sections-"));
+	mkdirSync(join(root, "memory"), { recursive: true });
+	writeFileSync(
+		join(root, "memory", "PROJECT.md"),
+		`# PROJECT\n\n> 契约。\n\n## 这是什么\n\n${huge}\n\n## 坑\n\n这条必须活着。\n`,
+		"utf8",
+	);
+	writeFileSync(join(root, "memory", "SESSIONS.md"), "# SESSIONS\n\n> 最新在最上。\n", "utf8");
+	writeFileSync(join(root, "memory", "DECISIONS.md"), "# DECISIONS\n\n> 最新在最上。\n", "utf8");
+	const c = fakeContext();
+	apply(c.ctx, {});
+	await preStep(c.handlers, fakeAgent(root));
+	const reader = fakeAgent(root);
+	const pass = await preStep(c.handlers, reader);
+	const text = publishedBlock(reader, pass).content[0].text;
+	assert.ok(text.includes("本节已超出注入上限"), "the cut section must say so");
+	assert.ok(text.includes("这条必须活着"), "a smaller section must survive its oversized sibling");
+	assert.ok(!text.includes(huge), "the oversized section must actually be cut");
+});
+
 /* --- 4. Settings UI API -------------------------------------------- */
 
 const WEB_PROJECT = mkdtempSync(join(tmpdir(), "pm-web-"));
