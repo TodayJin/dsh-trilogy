@@ -158,6 +158,18 @@ Because: 逼出这个选择的约束
 
 > 「每个会话开始都加载最新」靠这一步保证。
 
+#### 4.2.2 source 的 kind 必须自带生产者名
+
+会话格式 v4 退役了 `{kind:'plugin', plugin:<id>}` 这层包装：`dsh-session-format-v3-to-v4`
+的 `source()` 见到它就抛 `format v4 message requires a producer-owned source kind`。所以插件
+打出去的 source 是 `{kind:'plugin:trilogy', form:...}` —— **kind 本身就得报出是谁**。
+
+读的时候两种都认（`isTrilogySource` 两个分支）：迁移过的会话里老块会被宿主改写成
+`plugin:trilogy`，而没被迁移的旧块还带着 `plugin` 键，认不出来就会把同一份记忆叠第二份。
+
+`test/smoke.mjs` 的「injected messages carry a producer-owned source kind」是这条的护栏 ——
+其余用例都不看 kind，退回老形状只会在这个测试里变红。
+
 ### 4.3 会话进行中：显式记录工具
 
 提供模型可调用的工具（分类写入 + 读取）：

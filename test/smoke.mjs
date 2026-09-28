@@ -524,6 +524,32 @@ await check("one oversized PROJECT.md section cannot eat the whole share", async
 	assert.ok(!text.includes(huge), "the oversized section must actually be cut");
 });
 
+/* --- 3c. the producer kind on injected sources ---------------------- */
+
+await check("injected messages carry a producer-owned source kind", async () => {
+	// Session format v4 retired the `{kind:'plugin', plugin:<id>}` wrapper and refuses any
+	// message that still carries it, so the kind itself has to name the producer. Nothing
+	// else in this suite reads the kind: a regression to the old shape would pass every
+	// other check and only fail inside a real host, on a real session.
+	const root = mkdtempSync(join(tmpdir(), "pm-source-kind-"));
+	const c = fakeContext();
+	apply(c.ctx, {});
+	const subject = fakeAgent(root);
+
+	const block = publishedBlock(subject, await preStep(c.handlers, subject));
+	assert.equal(block.source.kind, `plugin:${name}`, `the block's source kind: ${JSON.stringify(block.source)}`);
+	assert.equal("plugin" in block.source, false, `the retired wrapper is back: ${JSON.stringify(block.source)}`);
+
+	// The update path is a different message built from the same constant; assert it too.
+	writeFileSync(join(root, "memory", "PROJECT.md"), "# PROJECT\n\n## 现状\n\n改过了\n", "utf8");
+	const second = await preStep(c.handlers, subject);
+	assert.equal(second.messages.length, 1, "the change must still be announced");
+	const notice = second.messages[0];
+	assert.equal(notice.source.form, "trilogy-update", "this test wants the notice path");
+	assert.equal(notice.source.kind, `plugin:${name}`, `the notice's source kind: ${JSON.stringify(notice.source)}`);
+	assert.equal("plugin" in notice.source, false, `the retired wrapper is back: ${JSON.stringify(notice.source)}`);
+});
+
 /* --- 4. Settings UI API -------------------------------------------- */
 
 const WEB_PROJECT = mkdtempSync(join(tmpdir(), "pm-web-"));
