@@ -577,8 +577,8 @@ await check("a web profile registers the Settings UI prefix route", () => {
  * @param pathname - request pathname, query included.
  * @param options - method and optional JSON body object.
  */
-async function callRoute(pathname, { method = "GET", body, remoteAddress = "127.0.0.1" } = {}) {
-	assert.ok(web.apiHandler !== null, "API route is not registered");
+async function callRoute(pathname, { method = "GET", body, remoteAddress = "127.0.0.1", api = web.apiHandler } = {}) {
+	assert.ok(api !== null, "API route is not registered");
 	const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
 	req.method = method;
 	req.url = pathname;
@@ -594,7 +594,7 @@ async function callRoute(pathname, { method = "GET", body, remoteAddress = "127.
 			if (chunk !== undefined) payload += String(chunk);
 		},
 	};
-	await web.apiHandler(req, res);
+	await api(req, res);
 	return { status, body: payload.length === 0 ? {} : JSON.parse(payload) };
 }
 
@@ -698,6 +698,35 @@ await check("the mutating API is fenced to this machine", async () => {
 	});
 	assert.equal(status, 403, JSON.stringify(body));
 	assert.ok(String(body.error).includes("本机"), JSON.stringify(body));
+});
+
+await check("a registry entry without memoryDir falls back to the workspace's memoryDirName", async () => {
+	// A hand-edited or pre-schema registry can lack memoryDir. The fallback used to
+	// join "memory" twice and ignore memoryDirName, so the panel reported a directory
+	// that does not exist and Clear addressed the same wrong path.
+	const root = mkdtempSync(join(tmpdir(), "pm-nodir-"));
+	const registryPath = join(process.env.DSH_HOME, "trilogy", "registry.json");
+	const registry = existsSync(registryPath) ? JSON.parse(read(registryPath)) : { version: 1, workspaces: {} };
+	registry.workspaces[root] = { bootBlockFile: "AGENTS.md", firstSeen: "2026-01-01T00:00:00.000Z", lastSeen: "2026-01-02T00:00:00.000Z" };
+	writeFileSync(registryPath, JSON.stringify(registry, null, 2), "utf8");
+
+	const listed = await callRoute("/trilogy/workspaces");
+	assert.equal(wsOf(listed.body, root).memoryDir, join(root, "memory"), "the fallback must name the workspace's own memory directory");
+
+	// A configured directory name is what the fallback follows, not the default.
+	const notes = fakeContext({ web: true });
+	apply(notes.ctx, { memoryDirName: "notes" });
+	mkdirSync(join(root, "notes"), { recursive: true });
+	writeFileSync(join(root, "notes", "PROJECT.md"), "# PROJECT\n", "utf8");
+	const custom = await callRoute("/trilogy/workspaces", { api: notes.apiHandler });
+	const row = wsOf(custom.body, root);
+	assert.equal(row.memoryDir, join(root, "notes"), "memoryDirName must decide the fallback");
+	assert.equal(row.exists, true, "the files in the configured directory must be found");
+	assert.equal(row.files["PROJECT.md"].bytes > 0, true, "the summary must read from the configured directory");
+
+	const cleared = await callRoute("/trilogy/clear", { method: "POST", body: { root }, api: notes.apiHandler });
+	assert.deepEqual(cleared.body.cleared, ["PROJECT.md"], JSON.stringify(cleared.body));
+	assert.ok(!existsSync(join(root, "notes", "PROJECT.md")), "Clear must address the configured directory");
 });
 
 /* --- 5. the composer status indicator ------------------------------- */

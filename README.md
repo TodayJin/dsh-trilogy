@@ -229,7 +229,7 @@ scaffold 出空模板后，只要 `PROJECT.md` 还是空的，就注入一条 bo
 ## 开发与测试
 
 ```sh
-node test/smoke.mjs            # 72 项，宿主半边
+node test/smoke.mjs            # 74 项，宿主半边
 node test/client-render.mjs    # 9 项，浏览器半边：每个组件都真的渲染一次，并检查注入的样式表
 node test/client-interact.mjs  # 29 项，浏览器半边：点击 → 请求 → 状态 → 重渲染
 ```
